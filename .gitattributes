@@ -1,0 +1,15 @@
+# 统一换行与二进制处理，避免不同平台 clone 后行为不一致
+* text=auto
+
+# Windows 批处理必须是 CRLF，否则 cmd 会把续行符 ^ 也一起吃掉（曾导致打包脚本报错）
+*.bat text eol=crlf
+
+# Python / Markdown / 文本统一 LF
+*.py  text eol=lf
+*.md  text eol=lf
+*.txt text eol=lf
+
+# 二进制资源不做任何换行转换
+*.ico binary
+*.png binary
+*.exe binary
