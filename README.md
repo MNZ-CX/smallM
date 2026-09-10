@@ -46,7 +46,7 @@
 ## 📥 Release 下载指南（推荐：零依赖）
 
 1. 打开仓库页面右侧的 **Releases**，或直接访问
-   👉 `https://github.com/MNZ-CX/smallM/releases`
+   👉 **https://github.com/MNZ-CX/smallM/releases/latest**
 2. 在最新版本（**Latest**）的 **Assets** 区域点击 **`smallM.exe`** 开始下载（约 35 MB）
 3. 把 `smallM.exe` 放到一个**可写目录**，例如 `D:\Tools\smallM\`
 
