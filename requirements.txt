@@ -1,0 +1,5 @@
+# smallM runtime dependencies (Python 3.9+)
+# NOTE: keep this file strictly ASCII-only. pip on Windows decodes requirements
+# files with the system locale (cp936/GBK), so any non-ASCII comment character
+# makes "pip install -r requirements.txt" fail with UnicodeDecodeError.
+PyQt6>=6.6

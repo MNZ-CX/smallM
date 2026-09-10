@@ -1,0 +1,32 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.python-version
+venv/
+.venv/
+env/
+*.egg-info/
+
+# ---------- PyInstaller 打包产物 ----------
+build/
+dist/
+*.spec
+*.manifest
+
+# ---------- smallM 运行时数据（绝不入库） ----------
+# 用户的画布 / 日程 / 设置都写在 exe 同级目录
+memos.json
+memos.json.tmp
+.cache/
+exports/
+*.log
+run.log
+run_err.log
+
+# ---------- 编辑器 / 系统 ----------
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
