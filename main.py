@@ -1918,6 +1918,10 @@ class MainWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
         self.store = DataStore()
+        if not os.path.isfile(self.store.path):
+            # 首次运行立即落盘：用户能马上备份，也能当即发现目录不可写
+            if not self.store.save():
+                log(f"[WARN] 数据目录不可写，无法创建 {self.store.path}")
         self.settings = self.store.settings
         self.toaster = Toaster()
         self.hotkey: GlobalHotkey | None = None
@@ -3267,7 +3271,7 @@ class CaptureBar(QWidget):
 def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
-    app.setApplicationDisplayName(APP_NAME)
+    app.setApplicationDisplayName("smallM")
     app.setQuitOnLastWindowClosed(False)
     app.setStyle("Fusion")
     app.setPalette(dark_palette())
