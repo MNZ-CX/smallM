@@ -7,8 +7,8 @@
 一张常驻屏幕角落的玻璃卡片，装下你的碎片想法、待办日程与整月记忆。
 
 ![界面预览](assets/screenshot.png)
-<img width="336" height="467" alt="image" src="https://github.com/user-attachments/assets/19ff876b-f337-4c7c-a8d9-e01eb711a85a" />
-<img width="336" height="702" alt="image" src="https://github.com/user-attachments/assets/389fe30a-22ec-42d1-a452-2047cbecf229" />
+<img width="336" height="467" alt="smallM 界面预览" src="assets/screenshot-1.png" />
+<img width="336" height="702" alt="smallM 界面预览" src="assets/screenshot-2.png" />
 
 
 
@@ -201,7 +201,8 @@ smallM/
 ├── CHANGELOG.md       # 版本更新日志
 ├── assets/
 │   ├── smallM.ico     # exe 图标（256×256）
-│   └── screenshot.png # README 预览图
+│   ├── screenshot.png # README 预览图
+│   └── screenshot-1/2.png # README 头图（本地文件，GitHub 与 Gitee 都能显示）
 └── .gitignore         # 忽略打包产物与运行时数据（memos.json 不入库）
 ```
 
