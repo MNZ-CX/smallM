@@ -7,6 +7,10 @@
 一张常驻屏幕角落的玻璃卡片，装下你的碎片想法、待办日程与整月记忆。
 
 ![界面预览](assets/screenshot.png)
+<img width="336" height="467" alt="image" src="https://github.com/user-attachments/assets/19ff876b-f337-4c7c-a8d9-e01eb711a85a" />
+<img width="336" height="702" alt="image" src="https://github.com/user-attachments/assets/389fe30a-22ec-42d1-a452-2047cbecf229" />
+
+
 
 ![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-0078d4)
 ![Python](https://img.shields.io/badge/Python-3.9%2B-3776ab)
