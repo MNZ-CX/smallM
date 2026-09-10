@@ -43,6 +43,7 @@ from datetime import date, datetime, timedelta
 from PyQt6.QtCore import (
     QAbstractAnimation,
     QAbstractNativeEventFilter,
+    QDateTime,
     QEasingCurve,
     QEvent,
     QObject,
@@ -73,6 +74,7 @@ from PyQt6.QtWidgets import (
     QFrame,
     QGraphicsDropShadowEffect,
     QGraphicsOpacityEffect,
+    QDateTimeEdit,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -87,12 +89,14 @@ from PyQt6.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
 
 # ==========================================================================
 # §1 常量与设计令牌
 # ==========================================================================
 APP_NAME = "悬浮日历备忘"
+APP_VERSION = "1.0.1"
 APP_ID = "FloatingCalendar.Memo"
 
 
@@ -123,11 +127,11 @@ CANVAS_MIN_H = 88          # 画布最小高度（自适应时会收缩到这个
 LIST_VIEW_MIN_H = 132      # 日程列表最小高度（其余空间由它吸收）
 CARD_H = 38                # 单条日程卡片固定高度（宽自适应）
 TOAST_H = 46               # 撤销条高度
-STATUS_H = 22              # 底栏高度
+STATUS_H = 28              # 底栏高度（定高控件，便于精确计算布局）
 BODY_MARGINS = 14          # 主体上下内边距合计
 DRAG_THRESHOLD = 5         # 顶栏拖拽触发阈值（像素）
 RESIZE_MARGIN = 14         # 无边框窗口边缘可拖拽缩放的范围（透明外边距内）
-CAL_CELL_MIN = 20          # 月历日期格最小/最大高度（按可用空间自适应）
+CAL_CELL_MIN = 16          # 月历日期格最小/最大高度（按可用空间自适应）
 CAL_CELL_MAX = 34
 AUTOFIT_DEFAULT = True     # 画布高度随内容自适应（用户拖动分割条即自动关闭）
 
@@ -290,6 +294,17 @@ QSplitter::handle:vertical:pressed {{ background: rgba(59,130,246,0.6); }}
 /* ---- 右下角缩放抓手 ---- */
 #ResizeGrip {{ background: transparent; }}
 #ResizeGrip:hover {{ background: rgba(59,130,246,0.18); border-radius: 5px; }}
+
+/* ---- 提醒时间选择胶囊（右键输入框或点它选择时间） ---- */
+#TimePickBtn {{
+    background: rgba(255,255,255,0.05); border: 1px solid {BORDER};
+    border-radius: 9px; padding: 7px 10px; color: {TEXT_DIM}; font-size: 12px;
+}}
+#TimePickBtn:hover {{ border-color: {FOCUS}; color: #93b4fb; }}
+#TimePickBtn[pending="true"] {{
+    background: rgba(59,130,246,0.16); color: #93b4fb;
+    border: 1px solid rgba(59,130,246,0.55);
+}}
 
 /* ---- 到点提醒：全屏居中覆盖浮层 ---- */
 #ReminderOverlay {{ background: rgba(6,8,12,0.74); }}
@@ -1226,6 +1241,10 @@ class CalendarPanel(QFrame):
     def natural_height(self) -> int:
         return self.fit_height(10 ** 6)
 
+    def content_min_height(self) -> int:
+        """月历 6 行完整可见所需的最小高度（日期格取最小高度，绝不重叠）。"""
+        return self._chrome_height() + CAL_CELL_MIN * 6 + DayCell.GRID_SPACING * 5
+
     # ---------------- 月份 ----------------
     def shift_month(self, delta: int) -> None:
         year = self._cursor.year + (self._cursor.month - 1 + delta) // 12
@@ -1393,6 +1412,30 @@ class DayPreview(QFrame):
     def hide_preview(self) -> None:
         if self.isVisible():
             self.hide()
+
+
+class TimePicker(QWidget):
+    """自定义提醒时间选择器：内嵌在右键菜单里的非模态小面板。"""
+
+    applied = pyqtSignal(object)      # QDateTime
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.edit = QDateTimeEdit(QDateTime.currentDateTime().addSecs(600))
+        self.edit.setDisplayFormat("yyyy-MM-dd HH:mm")
+        self.edit.setCalendarPopup(True)
+        self.edit.setFixedHeight(30)
+        self.edit.setMinimumWidth(168)
+        confirm = QPushButton("设置")
+        confirm.setObjectName("AddBtn")
+        confirm.setFixedHeight(30)
+        confirm.setCursor(Qt.CursorShape.PointingHandCursor)
+        confirm.clicked.connect(lambda: self.applied.emit(self.edit.dateTime()))
+        row = QHBoxLayout(self)
+        row.setContentsMargins(8, 4, 8, 8)
+        row.setSpacing(6)
+        row.addWidget(self.edit, 1)
+        row.addWidget(confirm)
 
 
 class _ReminderCard(QFrame):
@@ -1870,7 +1913,7 @@ class UndoToast(QFrame):
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(APP_NAME)
+        self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
@@ -1886,6 +1929,9 @@ class MainWindow(QWidget):
         self._autofit = bool(self.settings.get("autofit", AUTOFIT_DEFAULT))
         self._calendar_open = False
         self._calendar_target_h = 0
+        self._user_height = 0            # 展开月历前的窗口高度（收起后恢复）
+        self._adjusting_calendar = False  # 展开/收起过程中禁止 resizeEvent 抢改高度
+        self._pending_when: tuple[str, str] | None = None   # 面板上选好的提醒时间
         self._adjusting_split = False
         self._hover_day = ""
         self._overlays: list[ReminderOverlay] = []      # 到点提醒浮层（每屏一个）
@@ -2066,6 +2112,17 @@ class MainWindow(QWidget):
         self.input = QLineEdit()
         self.input.setObjectName("ScheduleInput")
         self.input.returnPressed.connect(self._submit_schedule)
+        # 右键输入框即可选择提醒时间（同时保留粘贴/复制/剪切）
+        self.input.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.input.customContextMenuRequested.connect(
+            lambda pos: self._show_time_menu(pos))
+
+        self.time_btn = QPushButton("⏰ 提醒时间")
+        self.time_btn.setObjectName("TimePickBtn")
+        self.time_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.time_btn.setFixedHeight(34)
+        self.time_btn.clicked.connect(lambda: self._show_time_menu(None))
+
         add_btn = QPushButton("添加")
         add_btn.setObjectName("AddBtn")
         add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -2076,6 +2133,7 @@ class MainWindow(QWidget):
         input_row = QHBoxLayout()
         input_row.setContentsMargins(0, 0, 0, 0)
         input_row.setSpacing(8)
+        input_row.addWidget(self.time_btn)
         input_row.addWidget(self.input, 1)
         input_row.addWidget(add_btn)
         panel_layout.addLayout(input_row)
@@ -2124,19 +2182,21 @@ class MainWindow(QWidget):
         self.undo_toast = UndoToast(self.root)
         root_layout.addWidget(self.undo_toast)
 
-        # ---------- 状态栏 ----------
+        # ---------- 状态栏（定高，便于精确计算展开月历所需窗口高度） ----------
         self.status_label = QLabel("")
         self.status_label.setObjectName("HintText")
         self.count_label = QLabel("")
         self.count_label.setObjectName("HintText")
         self.resize_grip = ResizeGrip(self)
-        status_row = QHBoxLayout()
-        status_row.setContentsMargins(16, 3, 8, 5)
+        self.status_bar = QWidget()
+        self.status_bar.setFixedHeight(STATUS_H)
+        status_row = QHBoxLayout(self.status_bar)
+        status_row.setContentsMargins(16, 1, 8, 1)
         status_row.setSpacing(10)
         status_row.addWidget(self.status_label, 1)
         status_row.addWidget(self.count_label)
         status_row.addWidget(self.resize_grip)
-        root_layout.addLayout(status_row)
+        root_layout.addWidget(self.status_bar)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(22, 22, 22, 26)
@@ -2440,10 +2500,17 @@ class MainWindow(QWidget):
             return
 
         parsed = parse_schedule(raw, self._selected_date)
+        # 文字里没写时间时，用面板上选好的提醒时间（右键 / ⏰ 胶囊选择）
+        if not parsed["time"] and self._pending_when is not None:
+            day, moment = self._pending_when
+            parsed["time"] = moment
+            parsed["date"] = day
+            parsed["explicit_day"] = day != self._selected_date
         row = self.store.add_schedule(parsed["text"], parsed["time"], parsed["date"])
 
-        # ① 输入框瞬间清空，可立即输入下一条
+        # ① 输入框瞬间清空，可立即输入下一条；提醒时间选择随之复位
         self.input.clear()
+        self._clear_pending_time()
         # 输入里带了别的日期（如"明天 10:00 评审"）则自动切到那天
         if parsed["date"] != self._selected_date:
             self._selected_date = parsed["date"]
@@ -2457,6 +2524,87 @@ class MainWindow(QWidget):
         self._refresh_calendar()
         self._update_status()
         self.input.setFocus()
+
+    # ==================================================== 提醒时间选择（右键 / ⏰）
+    def _show_time_menu(self, pos) -> None:
+        """右键输入框或点 ⏰ 胶囊：菜单里直接选提醒时间。"""
+        menu = self._build_time_menu()
+        if pos is None:
+            anchor = self.time_btn.mapToGlobal(self.time_btn.rect().bottomLeft())
+        else:
+            anchor = self.input.mapToGlobal(pos)
+        menu.exec(anchor)
+
+    def _build_time_menu(self) -> QMenu:
+        menu = QMenu(self)
+        menu.addAction("粘贴", self.input.paste)
+        menu.addAction("复制", self.input.copy)
+        menu.addAction("剪切", self.input.cut)
+        menu.addSeparator()
+        menu.addAction("不提醒", self._clear_pending_time)
+        menu.addSeparator()
+
+        now = datetime.now()
+
+        def offset(minutes: int):
+            moment = now + timedelta(minutes=minutes)
+            return moment.date(), moment.strftime("%H:%M")
+
+        menu.addAction("立即（现在）", lambda: self._set_pending_time(*offset(0)))
+        menu.addAction(f"{SNOOZE_MINUTES} 分钟后",
+                       lambda: self._set_pending_time(*offset(SNOOZE_MINUTES)))
+        menu.addAction("30 分钟后", lambda: self._set_pending_time(*offset(30)))
+        menu.addAction("1 小时后", lambda: self._set_pending_time(*offset(60)))
+        menu.addSeparator()
+        for hour in (9, 12, 15, 18, 21):
+            menu.addAction(
+                f"今天 {hour:02d}:00",
+                lambda h=hour: self._set_pending_time(date.today(), f"{h:02d}:00"))
+        menu.addSeparator()
+        menu.addAction(
+            "明天 09:00",
+            lambda: self._set_pending_time(date.today() + timedelta(days=1), "09:00"))
+        menu.addSeparator()
+
+        picker = TimePicker()
+        picker.applied.connect(lambda qdt: self._apply_custom_time(qdt, menu))
+        action = QWidgetAction(menu)
+        action.setDefaultWidget(picker)
+        menu.addAction(action)
+        return menu
+
+    def _apply_custom_time(self, value, menu: QMenu) -> None:
+        menu.close()
+        self._set_pending_time(value.date().toPyDate(), value.time().toString("HH:mm"))
+
+    def _set_pending_time(self, day: date, moment: str) -> None:
+        self._pending_when = (day.strftime(DAY_FMT), moment)
+        self._sync_time_chip()
+        self.input.setFocus()
+
+    def _clear_pending_time(self) -> None:
+        self._pending_when = None
+        self._sync_time_chip()
+
+    def _sync_time_chip(self) -> None:
+        if not hasattr(self, "time_btn"):
+            return
+        if self._pending_when is None:
+            self.time_btn.setText("⏰ 提醒时间")
+            self.time_btn.setProperty("pending", False)
+            self.time_btn.setToolTip("点这里（或右键输入框）选择提醒时间")
+        else:
+            day, moment = self._pending_when
+            if day == today_str():
+                label = "今天"
+            elif day == (date.today() + timedelta(days=1)).strftime(DAY_FMT):
+                label = "明天"
+            else:
+                label = day[5:]
+            self.time_btn.setText(f"⏰ {label} {moment}")
+            self.time_btn.setProperty("pending", True)
+            self.time_btn.setToolTip(f"提醒时间：{day} {moment}（点这里可改）")
+        repolish(self.time_btn)
 
     def _flash_saved(self, parsed: dict) -> None:
         suffix = f" · {parsed['time']}" if parsed["time"] else (
@@ -2547,10 +2695,10 @@ class MainWindow(QWidget):
 
     def _sync_input_placeholder(self) -> None:
         if self._selected_date == today_str():
-            self.input.setPlaceholderText("输入日程，例如：15:00 部门例会，回车添加")
+            self.input.setPlaceholderText("输入日程内容，右键（或点左侧 ⏰）选提醒时间，回车添加")
         else:
             self.input.setPlaceholderText(
-                f"添加到 {self._date_label(self._selected_date)}，例如：10:00 复盘，回车添加")
+                f"添加到 {self._date_label(self._selected_date)}，右键选提醒时间，回车添加")
 
     # ==================================================== 月历展开（只改自身高度）
     def _lower_spacing(self) -> int:
@@ -2577,37 +2725,110 @@ class MainWindow(QWidget):
 
         panel_min = self.schedule_panel.minimumSizeHint().height()
         spacing = self._lower_spacing()
-        if target:
-            # ① 先算出月历需要多高（空间不够时自动压缩日期格，不裁剪任何一行）
-            total_h = self.calendar.fit_height(self._calendar_budget())
-            self._calendar_target_h = total_h
-            # ② 把"月历 + 间距 + 日程面板最小高度"一起交给下方区块，画布平滑收缩让位
-            total = self._split_total()
-            lower_target = total_h + panel_min + spacing
-            self._set_split(total - lower_target, lower_target)
-            self.calendar.setVisible(True)
-            self._refresh_calendar()
-            start, end = self.calendar.maximumHeight(), total_h
-        else:
-            prev = self._calendar_target_h
-            self._calendar_target_h = 0
-            start, end = self.calendar.maximumHeight(), 0
-            # 收起后把空间还给画布
-            sizes = self.splitter.sizes()
-            if sizes:
-                self._set_split(sizes[0] + prev + spacing, sizes[1] - prev - spacing)
+        self._adjusting_calendar = True
+        try:
+            if target:
+                # ① 先腾地方：把窗口抬到能放下"完整月历 + 日程列表 + 画布"的高度
+                wanted = self.calendar.natural_height()
+                self._make_room_for_calendar(wanted, panel_min, spacing)
+                # ② 屏幕确实装不下时才压缩日期格（但绝不重叠）
+                budget = self._calendar_budget()
+                total_h = (self.calendar.fit_height(budget) if budget < wanted - 4
+                           else self.calendar.fit_height(10 ** 6))
+                self._calendar_target_h = total_h
+                # ③ 把空间分给下方区块（画布收缩让位，列表保住最小高度）
+                total = self._split_total()
+                lower_target = min(total - CANVAS_MIN_H, total_h + panel_min + spacing)
+                self._set_split(total - lower_target, lower_target)
+                self.calendar.setVisible(True)
+                self._refresh_calendar()
+                start, end = self.calendar.maximumHeight(), total_h
+            else:
+                prev = self._calendar_target_h
+                self._calendar_target_h = 0
+                self.calendar.setMinimumHeight(0)          # 先解锁，才能收起
+                start, end = self.calendar.maximumHeight(), 0
+                sizes = self.splitter.sizes()
+                if sizes:
+                    self._set_split(sizes[0] + prev + spacing, sizes[1] - prev - spacing)
+                self.setMinimumHeight(WINDOW_MIN_H)
+                if self._user_height and self.height() > self._user_height:
+                    self.resize(self.width(), self._user_height)
+                self._user_height = 0
+        finally:
+            self._adjusting_calendar = False
 
         animation = QPropertyAnimation(self.calendar, b"maximumHeight", self)
         animation.setDuration(CALENDAR_ANIM_MS)
         animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         animation.setStartValue(start)
         animation.setEndValue(end)
-        if not target:
+        if target:
+            # 动画结束后把最小高度锁到目标高度：任何情况下都不会被压缩重叠
+            animation.finished.connect(self._lock_calendar_height)
+        else:
             animation.finished.connect(lambda: self.calendar.setVisible(False))
             self._preview_timer.stop()
             self._preview.hide_preview()
         animation.start()
         self._remember(animation)
+
+    def _lock_calendar_height(self) -> None:
+        if self._calendar_open and self._calendar_target_h:
+            self.calendar.setMaximumHeight(self._calendar_target_h)
+            self.calendar.setMinimumHeight(self._calendar_target_h)
+            self._activate_lower_layout()
+
+    def _activate_lower_layout(self) -> None:
+        """让下方区块立即重排（避免月历高度变化后日程面板仍停在旧位置）。"""
+        layout = self.lower.layout()
+        if layout is not None:
+            layout.invalidate()
+            layout.activate()
+
+    def _make_room_for_calendar(self, calendar_h: int, panel_min: int, spacing: int) -> None:
+        """展开月历前确保窗口装得下：抬高空窗与最小高度限制。
+
+        月历日期格是固定高度，可用高度不足时网格行会叠在一起（"文字重复"）；
+        所以宁可把窗口长高，也不压缩月历。所需高度按各部分精确累加，
+        不依赖各层布局的 minimumSizeHint（它在嵌套布局里并不可靠）。
+        """
+        if not self._user_height:
+            self._user_height = self.height()
+        outer = max(0, self.height() - self.root.height())        # 上下阴影边距
+        needed = (outer
+                  + self.top_bar.height()
+                  + BODY_MARGINS
+                  + CANVAS_MIN_H
+                  + calendar_h
+                  + spacing
+                  + panel_min
+                  + self.status_bar.height())
+        screen = self.screen() or QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen else None
+        if available is not None:
+            needed = min(needed, available.height() - 12)
+        needed = max(WINDOW_MIN_H, needed)
+        self.setMinimumHeight(needed)
+        if self.height() < needed:
+            y = self.y()
+            if available is not None and y + needed > available.bottom():
+                y = max(available.top() + 4, available.bottom() - needed - 4)
+            self.resize(self.width(), needed)
+            self.move(self.x(), y)
+
+    def _refit_calendar(self) -> None:
+        """窗口尺寸变化时重新适配月历高度（保持 6 行日期格完整可见）。"""
+        if (not self._calendar_open or self._adjusting_calendar
+                or not self._calendar_target_h or self._split_total() <= 0):
+            return
+        total_h = self.calendar.fit_height(self._calendar_budget())
+        if abs(total_h - self._calendar_target_h) <= 4:
+            return
+        self._calendar_target_h = total_h
+        self.calendar.setMaximumHeight(total_h)
+        self.calendar.setMinimumHeight(total_h)
+        self._activate_lower_layout()
 
     # ==================================================== 月历悬停预览
     def _on_day_hovered(self, day: str) -> None:
@@ -2813,7 +3034,7 @@ class MainWindow(QWidget):
 
         self.tray = QSystemTrayIcon(icon, self)
         self.tray.setContextMenu(menu)
-        self.tray.setToolTip(f"{APP_NAME} · 速记 {HOTKEY}")
+        self.tray.setToolTip(f"{APP_NAME} v{APP_VERSION} · 速记 {HOTKEY}")
         self.tray.activated.connect(self._on_tray_activated)
         self.tray.show()
         self.toaster.tray = self.tray
@@ -2913,6 +3134,7 @@ class MainWindow(QWidget):
         super().resizeEvent(event)
         self._preview.hide_preview()
         self._schedule_autofit()
+        self._refit_calendar()
 
     def hideEvent(self, event) -> None:  # noqa: N802
         self._preview.hide_preview()
@@ -3056,7 +3278,7 @@ def main() -> int:
     window.raise_()
     window.activateWindow()
     log(
-        f"[OK] {APP_NAME} 已启动 | 数据: {DATA_FILE} | 画布: {CANVAS_COUNT} 张 | "
+        f"[OK] {APP_NAME} v{APP_VERSION} 已启动 | 数据: {DATA_FILE} | 画布: {CANVAS_COUNT} 张 | "
         f"窗口: {window.width()}x{window.height()} | "
         f"速记热键: {HOTKEY} ({'全局生效' if window.hotkey.registered else '应用内回退'}) | "
         f"通知: {'Windows 原生 Toast' if window.toaster.enabled else '托盘气泡'}",
