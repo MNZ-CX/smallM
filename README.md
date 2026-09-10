@@ -13,6 +13,8 @@
 ![PyQt6](https://img.shields.io/badge/UI-PyQt6-41cd52)
 ![Deps](https://img.shields.io/badge/dependencies-PyQt6%20only-10b981)
 
+[GitHub](https://github.com/MNZ-CX/smallM) · [Gitee（国内镜像）](https://gitee.com/ZfMtNe/small-m)
+
 </div>
 
 ---
@@ -45,16 +47,21 @@
 
 ## 📥 Release 下载指南（推荐：零依赖）
 
-1. 打开仓库页面右侧的 **Releases**，或直接访问
-   👉 **https://github.com/MNZ-CX/smallM/releases/latest**
-2. 在最新版本（**Latest**）的 **Assets** 区域点击 **`smallM.exe`** 开始下载（约 35 MB）
-3. 把 `smallM.exe` 放到一个**可写目录**，例如 `D:\Tools\smallM\`
+两个仓库**同步发布**，按网络情况挑一个（国内建议走 Gitee）：
+
+| 站点 | 下载入口 | 说明 |
+| --- | --- | --- |
+| **GitHub**（主仓库） | 👉 **https://github.com/MNZ-CX/smallM/releases/latest** | 新版本首发地 |
+| **Gitee**（国内镜像） | 👉 **https://gitee.com/ZfMtNe/small-m/releases** | 国内下载更快，版本同步 |
+
+1. 在最新版本（**Latest**）的 **Assets** 区域点击 **`smallM.exe`** 开始下载（约 35 MB）
+2. 把 `smallM.exe` 放到一个**可写目录**，例如 `D:\Tools\smallM\`
 
    > ⚠️ 不要放进 `C:\Program Files` —— 程序需要在**同级目录**写入 `memos.json`，系统目录无写入权限
 
-4. 双击运行。首次可能弹出 Windows SmartScreen 蓝色提示（exe 未做代码签名，属正常现象）：
+3. 双击运行。首次可能弹出 Windows SmartScreen 蓝色提示（exe 未做代码签名，属正常现象）：
    点击 **「更多信息」→「仍要运行」**
-5. 启动后窗口出现在屏幕右侧，托盘出现图标，`memos.json` 会自动生成在 exe 同级目录
+4. 启动后窗口出现在屏幕右侧，托盘出现图标，`memos.json` 会自动生成在 exe 同级目录
 
 **想开机自启？** 给 `smallM.exe` 建个快捷方式，丢进 `shell:startup`（`Win + R` 输入 `shell:startup` 回车即可打开该文件夹）
 
@@ -84,7 +91,7 @@
 ### 从源码运行
 
 ```bat
-git clone https://github.com/MNZ-CX/smallM.git
+git clone https://github.com/MNZ-CX/smallM.git        :: 或 https://gitee.com/ZfMtNe/small-m.git
 cd smallM
 pip install -r requirements.txt
 python main.py
@@ -127,7 +134,7 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed --name smallM ^
 1. **退出程序**：右键托盘图标 →「退出程序」
    （直接点窗口 `✕` 只是退到托盘，进程仍在运行，会导致覆盖 exe 失败）
 2. **备份数据（建议）**：复制 exe 同级的 `memos.json` 到别处
-3. 到 **Releases** 下载新版 `smallM.exe`，**覆盖**旧文件
+3. 到 **Releases**（GitHub 或 Gitee 任选）下载新版 `smallM.exe`，**覆盖**旧文件
 4. 双击运行 —— 旧数据会自动加载，画布内容、日程、设置全部保留
 
 > ❗ 覆盖的是 **exe 一个文件**，千万不要删 `memos.json`，否则备忘与日程会被清空。
@@ -136,7 +143,7 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed --name smallM ^
 ### B. 源码用户
 
 ```bat
-git pull origin main
+git pull origin main        :: 或 git pull gitee main（Gitee 镜像）
 pip install -r requirements.txt
 python main.py
 ```
@@ -187,6 +194,7 @@ smallM/
 ├── main.py            # 单文件主程序：界面渲染 / 事件路由 / 数据存储 / 提醒引擎
 ├── requirements.txt   # 运行依赖（仅 PyQt6，保持 ASCII 以免 pip 在 GBK 环境报错）
 ├── build.bat          # 一键打包脚本（PyInstaller → dist\smallM.exe）
+├── CHANGELOG.md       # 版本更新日志
 ├── assets/
 │   ├── smallM.ico     # exe 图标（256×256）
 │   └── screenshot.png # README 预览图
