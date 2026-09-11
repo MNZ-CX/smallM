@@ -96,7 +96,7 @@ from PyQt6.QtWidgets import (
 # §1 常量与设计令牌
 # ==========================================================================
 APP_NAME = "悬浮日历备忘"
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.1.0"
 APP_ID = "FloatingCalendar.Memo"
 
 
@@ -126,6 +126,11 @@ WINDOW_MIN_H = 460
 CANVAS_MIN_H = 88          # 画布最小高度（自适应时会收缩到这个值）
 LIST_VIEW_MIN_H = 132      # 日程列表最小高度（其余空间由它吸收）
 CARD_H = 38                # 单条日程卡片固定高度（宽自适应）
+FB_CARD_H = 38             # 单条问题/反馈卡片高度
+INPUT_MIN_H = 34           # 日程输入框最小高度（单行）
+INPUT_MAX_H = 104          # 输入框自适应上限（约 4 行，再多就内部滚动）
+FB_INPUT_MAX_H = 132       # 问题描述可以更长一些
+NOTIFY_GRACE_S = 120       # 「立即/刚刚」这类时间仍要提醒的宽限窗口（秒）
 TOAST_H = 46               # 撤销条高度
 STATUS_H = 28              # 底栏高度（定高控件，便于精确计算布局）
 BODY_MARGINS = 14          # 主体上下内边距合计
@@ -252,13 +257,34 @@ QStackedWidget {{ background: transparent; }}
 #SchedCard[fresh="true"] {{ background: rgba(59,130,246,0.10); border: 1px solid {FOCUS}; }}
 #SchedText {{ color: {TEXT}; font-size: 13px; }}
 #SchedText[done="true"] {{ color: {TEXT_FAINT}; }}
-#TimeChip {{ background: rgba(59,130,246,0.16); color: #93b4fb; border-radius: 7px;
-             padding: 2px 7px; font-family: {MONO_STACK}; font-size: 11px; }}
+#TimeChip {{ background: rgba(59,130,246,0.16); color: #93b4fb; border: none;
+             border-radius: 7px; padding: 2px 7px; font-family: {MONO_STACK}; font-size: 11px; }}
+#TimeChip:hover {{ background: rgba(59,130,246,0.30); }}
 #TimeChip[plain="true"] {{ background: rgba(255,255,255,0.06); color: {TEXT_DIM}; }}
+#TimeChip[plain="true"]:hover {{ background: rgba(255,255,255,0.12); color: {TEXT}; }}
 #TimeChip[overdue="true"] {{ background: rgba(239,68,68,0.16); color: #fca5a5; }}
+#EditBtn {{ background: transparent; border: none; color: {TEXT_FAINT};
+            border-radius: 7px; font-size: 12px; padding: 0px; }}
+#EditBtn:hover {{ background: rgba(59,130,246,0.18); color: #93b4fb; }}
+#RowEdit {{ background: {BG}; border: 1px solid {FOCUS}; border-radius: 8px;
+            padding: 3px 8px; font-size: 13px; color: {TEXT}; }}
 #DelBtn {{ background: transparent; border: none; color: {TEXT_FAINT};
            border-radius: 7px; font-size: 12px; padding: 0px; }}
 #DelBtn:hover {{ background: rgba(239,68,68,0.18); color: #fca5a5; }}
+
+/* ---- 问题 / 反馈卡片 ---- */
+#FbCard {{ background: rgba(255,255,255,0.035); border: 1px solid {BORDER};
+           border-radius: 10px; }}
+#FbCard:hover {{ background: rgba(255,255,255,0.062); border-color: {BORDER_HOVER}; }}
+#FbCard[fixed="true"] {{ background: rgba(255,255,255,0.02); }}
+#FbCard[fresh="true"] {{ background: rgba(59,130,246,0.10); border: 1px solid {FOCUS}; }}
+#FbStamp {{ color: {TEXT_FAINT}; font-size: 10px; font-family: {MONO_STACK}; }}
+
+/* ---- 日程 / 问题输入框（多行自适应：内容变长自动长高，开头不会看不见） ---- */
+#ScheduleInput {{ background-color: {CARD}; border: 1px solid {BORDER};
+                  border-radius: 10px; padding: 6px 10px; font-size: 13px;
+                  color: {TEXT}; }}
+#ScheduleInput:focus {{ border: 1px solid {FOCUS}; }}
 
 /* ---- 复选框 ---- */
 QCheckBox {{ background: transparent; spacing: 0px; }}
@@ -390,10 +416,6 @@ def today_str() -> str:
     return date.today().strftime(DAY_FMT)
 
 
-def day_of(stamp: str) -> str:
-    return (stamp or "")[:10]
-
-
 def clear_layout(layout) -> None:
     """彻底销毁布局内控件，杜绝残影与悬挂引用。"""
     while layout.count():
@@ -499,9 +521,10 @@ class DataStore:
     @staticmethod
     def _blank() -> dict:
         return {
-            "version": 6,
+            "version": 7,
             "canvases": [{"color": color, "text": ""} for color in DOT_COLORS],
             "schedules": [],
+            "feedback": [],
             "snapshots": {},
             "settings": {
                 "active_canvas": 0,
@@ -556,6 +579,29 @@ class DataStore:
                 row["id"] = next_id
                 next_id += 1
         self._next_id = next_id
+
+        # 问题 / 反馈收集（version 7 新增；旧数据没有这个键，自动留空）
+        rows = raw.get("feedback")
+        if isinstance(rows, list):
+            for item in rows:
+                if not isinstance(item, dict):
+                    continue
+                text = str(item.get("text") or "").strip()
+                if not text:
+                    continue
+                self.data["feedback"].append({
+                    "id": int(item.get("id") or 0),
+                    "text": text,
+                    "status": "fixed" if item.get("status") == "fixed" else "open",
+                    "created": str(item.get("created") or now_str()),
+                    "fixed_at": str(item.get("fixed_at") or ""),
+                })
+        next_fb = max((row["id"] for row in self.data["feedback"]), default=0) + 1
+        for row in self.data["feedback"]:
+            if row["id"] <= 0:
+                row["id"] = next_fb
+                next_fb += 1
+        self._next_feedback_id = next_fb
 
         snapshots = raw.get("snapshots")
         if isinstance(snapshots, dict):
@@ -621,12 +667,6 @@ class DataStore:
 
     def add_schedule(self, text: str, moment: str = "", day: str = "") -> dict:
         day = day or today_str()
-        when = None
-        if moment:
-            try:
-                when = datetime.strptime(f"{day} {moment}", "%Y-%m-%d %H:%M")
-            except ValueError:
-                when = None
         row = {
             "id": self.next_id(),
             "text": text.strip(),
@@ -634,11 +674,47 @@ class DataStore:
             "date": day,
             "done": False,
             "done_at": "",
-            "notified": bool(when and when < datetime.now()),
+            "notified": self._is_stale(day, moment),
             "created": now_str(),
         }
         self.data["schedules"].append(row)
         self.save()
+        return row
+
+    @staticmethod
+    def _is_stale(day: str, moment: str) -> bool:
+        """已经明显过期的时间不再补弹提醒；但「刚刚/立即」要留着，10 秒内照常提醒。"""
+        if not moment:
+            return False
+        try:
+            when = datetime.strptime(f"{day} {moment}", "%Y-%m-%d %H:%M")
+        except ValueError:
+            return False
+        return when < datetime.now() - timedelta(seconds=NOTIFY_GRACE_S)
+
+    def update_schedule(self, schedule_id: int, text: str | None = None,
+                        moment: str | None = None, day: str | None = None) -> dict | None:
+        """就地修改已创建的日程：内容 / 提醒时间 / 所属日期（改完立即落盘）。"""
+        row = self.find(schedule_id)
+        if row is None:
+            return None
+        changed = False
+        if text is not None:
+            cleaned = text.strip()
+            if not cleaned:
+                return None                    # 空内容视为放弃修改，不覆盖原文
+            if cleaned != row["text"]:
+                row["text"] = cleaned
+                changed = True
+        if day is not None and day != row["date"]:
+            row["date"] = day
+            changed = True
+        if moment is not None and moment != row["time"]:
+            row["time"] = moment
+            changed = True
+        if changed:
+            row["notified"] = self._is_stale(row["date"], row["time"])
+            self.save()
         return row
 
     def find(self, schedule_id: int) -> dict | None:
@@ -686,19 +762,29 @@ class DataStore:
                 per[f"canvas_{index}"] = payload["previous"]
             self.save()
             return True
+        if kind == "feedback_delete":
+            index = max(0, min(payload["index"], len(self.data["feedback"])))
+            self.data["feedback"].insert(index, payload["row"])
+            self.save()
+            return True
+        if kind == "feedback_clear":
+            for index, row in sorted(payload["rows"], key=lambda pair: pair[0]):
+                self.data["feedback"].insert(
+                    max(0, min(index, len(self.data["feedback"]))), row)
+            self.save()
+            return True
         return False
 
     def heat_scores(self) -> dict[str, int]:
+        """月历热度点：只统计"这一天本身有什么"。
+
+        必须严格按日程所属日期（row["date"]）计分 —— 早先版本把"创建日期"和
+        "完成日期"也算进来，导致给明天建的日程会在今天格子上亮一个蓝点。
+        """
         scores: dict[str, int] = {}
         for row in self.data["schedules"]:
-            created_day = day_of(row.get("created"))
-            if created_day:
-                scores[created_day] = scores.get(created_day, 0) + 2
             if row.get("date"):
                 scores[row["date"]] = scores.get(row["date"], 0) + 1
-            if row.get("done") and row.get("done_at"):
-                done_day = day_of(row["done_at"])
-                scores[done_day] = scores.get(done_day, 0) + 2
         for day, per in self.data["snapshots"].items():
             if per:
                 scores[day] = scores.get(day, 0) + len(per)
@@ -734,6 +820,85 @@ class DataStore:
         row["notified"] = False
         self.save()
         return row
+
+    # ---------------- 问题 / 反馈收集 ----------------
+    def next_feedback_id(self) -> int:
+        value = getattr(self, "_next_feedback_id", 1)
+        self._next_feedback_id = value + 1
+        return value
+
+    def add_feedback(self, text: str) -> dict | None:
+        cleaned = text.strip()
+        if not cleaned:
+            return None
+        row = {
+            "id": self.next_feedback_id(),
+            "text": cleaned,
+            "status": "open",
+            "created": now_str(),
+            "fixed_at": "",
+        }
+        self.data["feedback"].append(row)
+        self.save()
+        return row
+
+    def feedback_items(self, only_open: bool = False) -> list[dict]:
+        """待修复排前面；同组内按记录时间倒序（新问题先看到）。
+
+        用两次稳定排序：先按时间倒序，再按状态分组 —— 组内顺序不会被打乱。
+        """
+        rows = sorted(self.data["feedback"], key=lambda row: row["created"], reverse=True)
+        if only_open:
+            rows = [row for row in rows if row["status"] == "open"]
+        return sorted(rows, key=lambda row: 0 if row["status"] == "open" else 1)
+
+    def find_feedback(self, item_id: int) -> dict | None:
+        return next((row for row in self.data["feedback"] if row["id"] == item_id), None)
+
+    def toggle_feedback(self, item_id: int, fixed: bool | None = None) -> dict | None:
+        row = self.find_feedback(item_id)
+        if row is None:
+            return None
+        target = (row["status"] != "fixed") if fixed is None else bool(fixed)
+        row["status"] = "fixed" if target else "open"
+        row["fixed_at"] = now_str() if target else ""
+        self.save()
+        return row
+
+    def update_feedback(self, item_id: int, text: str) -> dict | None:
+        row = self.find_feedback(item_id)
+        if row is None:
+            return None
+        cleaned = text.strip()
+        if not cleaned or cleaned == row["text"]:
+            return row
+        row["text"] = cleaned
+        self.save()
+        return row
+
+    def delete_feedback(self, item_id: int) -> dict | None:
+        for index, row in enumerate(self.data["feedback"]):
+            if row["id"] == item_id:
+                self.data["feedback"].pop(index)
+                self.save()
+                return {"kind": "feedback_delete", "index": index, "row": row}
+        return None
+
+    def clear_fixed_feedback(self) -> dict | None:
+        """清掉所有"已修复"，返回可撤销载荷（一次性还原）。"""
+        removed = [(index, row) for index, row in enumerate(self.data["feedback"])
+                   if row["status"] == "fixed"]
+        if not removed:
+            return None
+        for index, _row in reversed(removed):
+            self.data["feedback"].pop(index)
+        self.save()
+        return {"kind": "feedback_clear", "rows": removed}
+
+    def feedback_count(self, status: str | None = None) -> int:
+        if status is None:
+            return len(self.data["feedback"])
+        return sum(1 for row in self.data["feedback"] if row["status"] == status)
 
 
 # ==========================================================================
@@ -1701,64 +1866,171 @@ class CanvasPage(QFrame):
         return super().eventFilter(obj, event)
 
 
-class ScheduleCard(QFrame):
-    """单条日程：复选框 + 时间胶囊 + 文本 + 🗑（固定高度，宽度自适应）。"""
+class AutoTextInput(QTextEdit):
+    """单行观感、随内容自动增高（到上限后内部滚动）的输入框。
 
-    toggled = pyqtSignal(int)
-    deleted = pyqtSignal(int)
+    这修掉"内容比输入框长 → 开头看不见"的问题：文字自动换行、框体随之长高，
+    整段内容始终可见；到达 max_height 后停止长高并在内部滚动，不会无限撑窗口。
+    回车提交（Shift+回车换行），Esc 清空。
+    """
+
+    submitted = pyqtSignal()
+    grew = pyqtSignal(int)          # 高度变化，交给主窗口决定要不要让窗口长高
+
+    def __init__(self, placeholder: str = "", max_height: int = INPUT_MAX_H, parent=None):
+        super().__init__(parent)
+        self.setObjectName("ScheduleInput")
+        self.setAcceptRichText(False)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setPlaceholderText(placeholder)
+        self.setTabChangesFocus(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._max_height = max(INPUT_MIN_H, int(max_height))
+        self.setFixedHeight(INPUT_MIN_H)
+        self.textChanged.connect(self.sync_height)
+
+    # 与 QLineEdit 同名接口，调用处（粘贴/复制/剪切）无需区分控件类型
+    def text(self) -> str:  # type: ignore[override]
+        return self.toPlainText()
+
+    def sync_height(self) -> None:
+        viewport = self.viewport().width()
+        if viewport <= 0:
+            return
+        document = self.document()
+        document.setTextWidth(viewport)
+        # 文档高度 + 上下内边距（QSS 里的 padding，取整估算）+ 边框
+        needed = int(document.size().height()) + 15
+        target = max(INPUT_MIN_H, min(self._max_height, needed))
+        overflowing = needed > self._max_height
+        self.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded if overflowing
+            else Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        if target != self.height():
+            self.setFixedHeight(target)
+            self.grew.emit(target)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self.sync_height()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        key = event.key()
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and not (
+                event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
+            self.submitted.emit()
+            return
+        if key == Qt.Key.Key_Escape:
+            self.clear()
+            return
+        super().keyPressEvent(event)
+
+
+class EditableRow(QFrame):
+    """卡片基类：可省略显示的文本 + 双击/✎ 就地编辑 + 右键菜单信号。
+
+    卡片高度固定（布局稳定）；编辑时原地换成单行输入框，回车或失焦提交、Esc 取消。
+    """
+
+    edited = pyqtSignal(int, str)
+    menuRequested = pyqtSignal(int, object)
+
+    CARD_H = CARD_H
+    CARD_OBJECT = "SchedCard"
 
     def __init__(self, row: dict, parent=None):
         super().__init__(parent)
-        self.setObjectName("SchedCard")
-        self.schedule_id = int(row["id"])
-        self.setFixedHeight(CARD_H)
+        self.row_id = int(row["id"])
+        self.setObjectName(self.CARD_OBJECT)
+        self.setFixedHeight(self.CARD_H)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-
-        self.check = QCheckBox()
-        self.check.setChecked(bool(row["done"]))
-        self.check.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.check.setFixedSize(19, 19)
-        self.check.setToolTip("标记完成 / 取消完成")
-        # 只看鼠标：不给键盘焦点，避免在别处打字按空格时误切换本条日程
-        self.check.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.check.clicked.connect(lambda: self.toggled.emit(self.schedule_id))
-
-        self.chip = QLabel(row.get("time") or "待办")
-        self.chip.setObjectName("TimeChip")
-        if not row.get("time"):
-            self.chip.setProperty("plain", True)
-        if self._is_overdue(row):
-            self.chip.setProperty("overdue", True)
-        self.chip.setVisible(bool(row.get("time")))
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(
+            lambda pos: self.menuRequested.emit(self.row_id, pos))
 
         self.text_label = QLabel()
         self.text_label.setObjectName("SchedText")
-        self.text_label.setProperty("done", bool(row["done"]))
         # 水平方向 Ignored：始终占满剩余宽度，避免"省略→sizeHint 变窄→更省略"的塌缩死循环
         self.text_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        self.text_label.setMinimumWidth(60)
-        self._full_text = row["text"]
-        self.text_label.setToolTip(row["text"])
-        font = self.text_label.font()
-        font.setStrikeOut(bool(row["done"]))
-        self.text_label.setFont(font)
+        self.text_label.setMinimumWidth(50)
+        self._full_text = str(row["text"])
+        self.text_label.setToolTip(self._full_text)
 
-        remove = QPushButton("🗑")
-        remove.setObjectName("DelBtn")
-        remove.setFixedSize(24, 22)
-        remove.setFont(emoji_font(12))
-        remove.setCursor(Qt.CursorShape.PointingHandCursor)
-        remove.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        remove.setToolTip("删除这一条（3 秒内可撤销）")
-        remove.clicked.connect(lambda: self.deleted.emit(self.schedule_id))
+        self.editor = QLineEdit()
+        self.editor.setObjectName("RowEdit")
+        self.editor.setVisible(False)
+        self.editor.setMinimumWidth(50)
+        self.editor.returnPressed.connect(self.commit_edit)
+        self.editor.installEventFilter(self)
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 5, 7, 5)
-        layout.setSpacing(8)
-        layout.addWidget(self.check)
-        layout.addWidget(self.chip)
-        layout.addWidget(self.text_label, 1)
-        layout.addWidget(remove)
+        self.edit_btn = QPushButton("✎")
+        self.edit_btn.setObjectName("EditBtn")
+        self.edit_btn.setFixedSize(24, 22)
+        self.edit_btn.setFont(emoji_font(11))
+        self.edit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.edit_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.edit_btn.setToolTip("修改内容（也可以双击这一条）")
+        self.edit_btn.clicked.connect(self._on_edit_clicked)
+
+    # ---------------------------------------------------------------- 就地编辑
+    @property
+    def editing(self) -> bool:
+        return self.editor.isVisible()
+
+    def _on_edit_clicked(self) -> None:
+        if self.editing:
+            self.commit_edit()
+        else:
+            self.enter_edit()
+
+    def enter_edit(self) -> None:
+        self.editor.setText(self._full_text)
+        self.text_label.setVisible(False)
+        self.editor.setVisible(True)
+        self.edit_btn.setText("✓")
+        self.edit_btn.setToolTip("保存修改（回车）")
+        self.editor.setFocus()
+        self.editor.setCursorPosition(len(self._full_text))
+
+    def commit_edit(self) -> None:
+        if not self.editing:
+            return
+        text = self.editor.text().strip()
+        self._leave_edit()
+        if text and text != self._full_text:
+            self.edited.emit(self.row_id, text)
+
+    def cancel_edit(self) -> None:
+        if self.editing:
+            self._leave_edit()
+
+    def _leave_edit(self) -> None:
+        self.editor.setVisible(False)
+        self.text_label.setVisible(True)
+        self.edit_btn.setText("✎")
+        self.edit_btn.setToolTip("修改内容（也可以双击这一条）")
+
+    def eventFilter(self, obj, event):  # noqa: N802
+        if obj is self.editor:
+            if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
+                self.cancel_edit()
+                return True
+            if event.type() == QEvent.Type.FocusOut:
+                self.commit_edit()
+        return super().eventFilter(obj, event)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.enter_edit()
+        super().mouseDoubleClickEvent(event)
+
+    # ---------------------------------------------------------------- 显示
+    def refresh_text(self, row: dict) -> None:
+        self._full_text = str(row["text"])
+        self.text_label.setToolTip(self._full_text)
+        self._apply_elide()
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
@@ -1775,7 +2047,7 @@ class ScheduleCard(QFrame):
         这正是"鼠标移开卡片里就没内容"的根因。
         """
         width = self.text_label.width()
-        if width < 60:
+        if width < 50:
             self.text_label.setText(self._full_text)
             return
         self.text_label.setText(
@@ -1783,7 +2055,7 @@ class ScheduleCard(QFrame):
                 self._full_text, Qt.TextElideMode.ElideRight, width))
 
     def flash(self, milliseconds: int = 900) -> None:
-        """新卡片高亮闪一下（改用属性切换，不再使用长效 QGraphicsOpacityEffect）。"""
+        """新卡片高亮闪一下（属性切换，不用透明度效果器 —— 避免卡片空白/不可见）。"""
         self.setProperty("fresh", True)
         repolish(self)
         QTimer.singleShot(milliseconds, self._clear_flash)
@@ -1791,6 +2063,68 @@ class ScheduleCard(QFrame):
     def _clear_flash(self) -> None:
         self.setProperty("fresh", False)
         repolish(self)
+
+
+class ScheduleCard(EditableRow):
+    """单条日程：复选框 + 可点击的时间胶囊 + 文本 + ✎ 编辑 + 🗑 删除。"""
+
+    toggled = pyqtSignal(int)
+    deleted = pyqtSignal(int)
+    timeRequested = pyqtSignal(int)
+
+    def __init__(self, row: dict, parent=None):
+        super().__init__(row, parent)
+        self.schedule_id = self.row_id
+
+        self.check = QCheckBox()
+        self.check.setChecked(bool(row["done"]))
+        self.check.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.check.setFixedSize(19, 19)
+        self.check.setToolTip("标记完成 / 取消完成")
+        # 只看鼠标：不给键盘焦点，避免在别处打字按空格时误切换本条日程
+        self.check.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.check.clicked.connect(lambda: self.toggled.emit(self.schedule_id))
+
+        # 时间胶囊改成可点按钮：没有时间的条目也能点它补一个提醒时间
+        has_time = bool(row.get("time"))
+        self.chip = QPushButton(row.get("time") or "＋时间")
+        self.chip.setObjectName("TimeChip")
+        self.chip.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.chip.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.chip.setProperty("plain", not has_time)
+        self.chip.setProperty("overdue", self._is_overdue(row))
+        self.chip.setToolTip(f"提醒时间 {row['time']}，点击修改" if has_time
+                             else "点这里给这条设置提醒时间")
+        self.chip.clicked.connect(lambda: self.timeRequested.emit(self.schedule_id))
+
+        self.set_done_style(bool(row["done"]))
+
+        remove = QPushButton("🗑")
+        remove.setObjectName("DelBtn")
+        remove.setFixedSize(24, 22)
+        remove.setFont(emoji_font(12))
+        remove.setCursor(Qt.CursorShape.PointingHandCursor)
+        remove.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        remove.setToolTip("删除这一条（3 秒内可撤销）")
+        remove.clicked.connect(lambda: self.deleted.emit(self.schedule_id))
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 5, 7, 5)
+        layout.setSpacing(8)
+        layout.addWidget(self.check)
+        layout.addWidget(self.chip)
+        layout.addWidget(self.text_label, 1)
+        layout.addWidget(self.editor, 1)
+        layout.addWidget(self.edit_btn)
+        layout.addWidget(remove)
+
+    def set_done_style(self, done: bool) -> None:
+        self.setProperty("done", bool(done))
+        self.text_label.setProperty("done", bool(done))
+        font = self.text_label.font()
+        font.setStrikeOut(bool(done))
+        self.text_label.setFont(font)
+        repolish(self.text_label)
 
     @staticmethod
     def _is_overdue(row: dict) -> bool:
@@ -1801,6 +2135,69 @@ class ScheduleCard(QFrame):
         except (ValueError, KeyError):
             return False
         return when < datetime.now()
+
+
+class FeedbackCard(EditableRow):
+    """单条问题 / 反馈：复选框（待修复 ⇄ 已修复）+ 文本 + 记录时间 + ✎ + 🗑。"""
+
+    toggled = pyqtSignal(int)
+    deleted = pyqtSignal(int)
+
+    CARD_H = FB_CARD_H
+    CARD_OBJECT = "FbCard"
+
+    def __init__(self, row: dict, parent=None):
+        super().__init__(row, parent)
+        self.item_id = self.row_id
+        fixed = row.get("status") == "fixed"
+
+        self.check = QCheckBox()
+        self.check.setChecked(fixed)
+        self.check.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.check.setFixedSize(19, 19)
+        self.check.setToolTip("勾上 = 已修复（再点一次回到待修复）")
+        self.check.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.check.clicked.connect(lambda: self.toggled.emit(self.item_id))
+
+        self.stamp = QLabel(self._stamp(row))
+        self.stamp.setObjectName("FbStamp")
+        self.stamp.setToolTip(f"记录于 {row.get('created', '')}"
+                             + (f"，修复于 {row['fixed_at']}" if row.get("fixed_at") else ""))
+
+        self.set_fixed_style(fixed)
+
+        remove = QPushButton("🗑")
+        remove.setObjectName("DelBtn")
+        remove.setFixedSize(24, 22)
+        remove.setFont(emoji_font(12))
+        remove.setCursor(Qt.CursorShape.PointingHandCursor)
+        remove.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        remove.setToolTip("删除这条记录（3 秒内可撤销）")
+        remove.clicked.connect(lambda: self.deleted.emit(self.item_id))
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 5, 7, 5)
+        layout.setSpacing(8)
+        layout.addWidget(self.check)
+        layout.addWidget(self.text_label, 1)
+        layout.addWidget(self.editor, 1)
+        layout.addWidget(self.stamp)
+        layout.addWidget(self.edit_btn)
+        layout.addWidget(remove)
+
+    def set_fixed_style(self, fixed: bool) -> None:
+        self.setProperty("fixed", bool(fixed))
+        self.text_label.setProperty("done", bool(fixed))
+        font = self.text_label.font()
+        font.setStrikeOut(bool(fixed))
+        self.text_label.setFont(font)
+        repolish(self.text_label)
+
+    @staticmethod
+    def _stamp(row: dict) -> str:
+        raw = row.get("fixed_at") or row.get("created") or ""
+        return raw[5:16] if len(raw) >= 16 else raw
+
 
 
 class UndoToast(QFrame):
@@ -1932,6 +2329,7 @@ class MainWindow(QWidget):
         self._fade_enabled = not bool(self.settings.get("fade_lock"))
         self._autofit = bool(self.settings.get("autofit", AUTOFIT_DEFAULT))
         self._calendar_open = False
+        self._view = "schedules"         # 下方区块当前视图：schedules / feedback
         self._calendar_target_h = 0
         self._user_height = 0            # 展开月历前的窗口高度（收起后恢复）
         self._adjusting_calendar = False  # 展开/收起过程中禁止 resizeEvent 抢改高度
@@ -2021,6 +2419,10 @@ class MainWindow(QWidget):
         self.calendar_btn = icon_button("📅", "展开 / 收起月历（点日期切换下方清单）")
         self.calendar_btn.setFont(emoji_font(13))
         self.calendar_btn.clicked.connect(lambda: self.toggle_calendar())
+        self.feedback_btn = icon_button("🐞", "问题 / 反馈收集页（随手记下发现的问题，攒够了一起修）")
+        self.feedback_btn.setFont(emoji_font(12))
+        self.feedback_btn.clicked.connect(lambda: self._show_view(
+            "schedules" if self._view == "feedback" else "feedback"))
         self.autofit_btn = icon_button("⇕", "画布高度随内容自适应（点击切换）")
         self.autofit_btn.clicked.connect(self.toggle_autofit)
         self.autofit_btn.setProperty("active", self._autofit)
@@ -2032,7 +2434,7 @@ class MainWindow(QWidget):
         minimize_btn.clicked.connect(self.hide)
         close_btn = icon_button("✕", "退到托盘（提醒继续生效）", close=True)
         close_btn.clicked.connect(self.close)
-        for button in (self.autofit_btn, self.calendar_btn, self.lock_btn,
+        for button in (self.autofit_btn, self.calendar_btn, self.feedback_btn, self.lock_btn,
                        minimize_btn, close_btn):
             top_layout.addWidget(button)
         root_layout.addWidget(self.top_bar)
@@ -2113,9 +2515,10 @@ class MainWindow(QWidget):
         title_row.addWidget(self.export_btn)
         panel_layout.addLayout(title_row)
 
-        self.input = QLineEdit()
-        self.input.setObjectName("ScheduleInput")
-        self.input.returnPressed.connect(self._submit_schedule)
+        self.input = AutoTextInput("输入日程内容，右键（或点左侧 ⏰）选提醒时间，回车添加",
+                                   max_height=INPUT_MAX_H)
+        self.input.submitted.connect(self._submit_schedule)
+        self.input.grew.connect(lambda _h: self._ensure_room_for_input())
         # 右键输入框即可选择提醒时间（同时保留粘贴/复制/剪切）
         self.input.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.input.customContextMenuRequested.connect(
@@ -2137,9 +2540,9 @@ class MainWindow(QWidget):
         input_row = QHBoxLayout()
         input_row.setContentsMargins(0, 0, 0, 0)
         input_row.setSpacing(8)
-        input_row.addWidget(self.time_btn)
+        input_row.addWidget(self.time_btn, 0, Qt.AlignmentFlag.AlignTop)
         input_row.addWidget(self.input, 1)
-        input_row.addWidget(add_btn)
+        input_row.addWidget(add_btn, 0, Qt.AlignmentFlag.AlignTop)
         panel_layout.addLayout(input_row)
 
         # 多条目滚动列表：QScrollArea + setWidgetResizable(True)
@@ -2167,6 +2570,11 @@ class MainWindow(QWidget):
         self.schedule_scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         panel_layout.addWidget(self.schedule_scroll, 1)
         lower_layout.addWidget(self.schedule_panel, 1)
+
+        # ---------- 问题 / 反馈收集面板（与日程面板互斥显示，共用同一块区域） ----------
+        self.feedback_panel = self._build_feedback_panel()
+        self.feedback_panel.setVisible(False)
+        lower_layout.addWidget(self.feedback_panel, 1)
 
         # ---------- 垂直分割条：画布 ↔ 月历/日程 可自由拖动 ----------
         self.splitter = QSplitter(Qt.Orientation.Vertical)
@@ -2213,6 +2621,124 @@ class MainWindow(QWidget):
         self.capture_bar = CaptureBar()
         self._sync_input_placeholder()
         self._sync_dots()
+
+    # ==================================================== 问题 / 反馈收集页
+    def _build_feedback_panel(self) -> QFrame:
+        """随手记录发现的问题，攒够了一次性修（可与"已修复"状态、编号导出配合）。"""
+        panel = QFrame()
+        panel.setObjectName("Panel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(12, 10, 12, 12)
+        layout.setSpacing(8)
+
+        self.fb_title = QLabel("🐞 问题收集")
+        self.fb_title.setObjectName("PanelTitle")
+        self.fb_meta = QLabel("")
+        self.fb_meta.setObjectName("PanelMeta")
+        self.fb_export_btn = ghost_button(
+            "复制待修复", "把还没修的问题整理成编号列表复制到剪贴板，可直接发给 AI 一次性修")
+        self.fb_export_btn.clicked.connect(self._export_feedback)
+        self.fb_clean_btn = ghost_button("清理已修复", "删除所有已标记为已修复的记录（3 秒内可撤销）")
+        self.fb_clean_btn.clicked.connect(self._clear_fixed_feedback)
+
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(8)
+        title_row.addWidget(self.fb_title)
+        title_row.addWidget(self.fb_meta)
+        title_row.addStretch(1)
+        title_row.addWidget(self.fb_export_btn)
+        title_row.addWidget(self.fb_clean_btn)
+        layout.addLayout(title_row)
+
+        self.fb_input = AutoTextInput(
+            "记录发现的问题：现象 / 怎么复现 / 期望是什么，回车记录",
+            max_height=FB_INPUT_MAX_H)
+        self.fb_input.submitted.connect(self._add_feedback)
+        self.fb_input.grew.connect(lambda _h: self._ensure_room_for_input())
+        fb_add = QPushButton("记录")
+        fb_add.setObjectName("AddBtn")
+        fb_add.setCursor(Qt.CursorShape.PointingHandCursor)
+        fb_add.setFixedHeight(34)
+        fb_add.setToolTip("回车或点击记录；记完输入框立刻清空")
+        fb_add.clicked.connect(self._add_feedback)
+
+        input_row = QHBoxLayout()
+        input_row.setContentsMargins(0, 0, 0, 0)
+        input_row.setSpacing(8)
+        input_row.addWidget(self.fb_input, 1)
+        input_row.addWidget(fb_add, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(input_row)
+
+        self.fb_host = QWidget()
+        self.fb_host.setObjectName("ScheduleHost")
+        self.fb_host.setAutoFillBackground(False)
+        self.fb_layout = QVBoxLayout(self.fb_host)
+        self.fb_layout.setContentsMargins(0, 0, 0, 0)
+        self.fb_layout.setSpacing(6)
+
+        self.fb_scroll = QScrollArea()
+        self.fb_scroll.setObjectName("ScheduleScroll")
+        self.fb_scroll.setWidgetResizable(True)
+        self.fb_scroll.setWidget(self.fb_host)
+        self.fb_scroll.setMinimumHeight(LIST_VIEW_MIN_H)
+        self.fb_scroll.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        self.fb_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.fb_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.fb_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.fb_scroll.viewport().setAutoFillBackground(False)
+        self.fb_scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        layout.addWidget(self.fb_scroll, 1)
+        return panel
+
+    def _active_panel(self) -> QFrame:
+        """当前显示的下面板（月历腾地方时按它算最小高度）。"""
+        return self.schedule_panel if self._view == "schedules" else self.feedback_panel
+
+    def _show_view(self, name: str) -> None:
+        name = "feedback" if name == "feedback" else "schedules"
+        if self._view == name:
+            if name == "feedback":
+                self._refresh_feedback_list()
+            (self.fb_input if name == "feedback" else self.input).setFocus()
+            return
+        self._view = name
+        showing_schedules = name == "schedules"
+        self.schedule_panel.setVisible(showing_schedules)
+        self.feedback_panel.setVisible(not showing_schedules)
+        self.feedback_btn.setProperty("active", not showing_schedules)
+        repolish(self.feedback_btn)
+        if not showing_schedules:
+            self._refresh_feedback_list()
+        layout = self.lower.layout()
+        if layout is not None:
+            layout.invalidate()
+            layout.activate()
+        self._ensure_room_for_input()
+        if self._calendar_open:
+            self._refit_calendar()
+        self._update_status()
+        (self.input if showing_schedules else self.fb_input).setFocus()
+
+    def _ensure_room_for_input(self) -> None:
+        """输入框随内容长高后，必要时让窗口一起长高（否则列表会被挤到不可用）。"""
+        if self._adjusting_calendar:
+            return
+        layout = self.layout()
+        if layout is None or not self.isVisible():
+            return
+        needed = layout.minimumSize().height()
+        screen = self.screen() or QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen else None
+        if available is not None:
+            needed = min(needed, available.height() - 12)
+        needed = max(WINDOW_MIN_H, needed)
+        if self.height() < needed:
+            y = self.y()
+            if available is not None and y + needed > available.bottom():
+                y = max(available.top() + 4, available.bottom() - needed - 4)
+            self.resize(self.width(), needed)
+            self.move(self.x(), y)
 
     # ==================================================== 窗口尺寸/位置（可自由调整）
     def _apply_pin(self) -> None:
@@ -2365,7 +2891,7 @@ class MainWindow(QWidget):
         total = self._split_total()
         if total <= 0:
             return
-        panel_min = self.schedule_panel.minimumSizeHint().height()
+        panel_min = self._active_panel().minimumSizeHint().height()
         lower_min = panel_min + (self._calendar_target_h if self._calendar_open else 0)
         page = self.pages[self._page]
         doc_h = page.editor.document().size().height()
@@ -2539,13 +3065,20 @@ class MainWindow(QWidget):
             anchor = self.input.mapToGlobal(pos)
         menu.exec(anchor)
 
-    def _build_time_menu(self) -> QMenu:
+    def _build_time_menu(self, target_id: int | None = None) -> QMenu:
+        """提醒时间菜单；target_id 不为空时改的是"已存在的那条日程"，而不是待输入的这条。"""
         menu = QMenu(self)
-        menu.addAction("粘贴", self.input.paste)
-        menu.addAction("复制", self.input.copy)
-        menu.addAction("剪切", self.input.cut)
-        menu.addSeparator()
-        menu.addAction("不提醒", self._clear_pending_time)
+        if target_id is None:
+            menu.addAction("粘贴", self.input.paste)
+            menu.addAction("复制", self.input.copy)
+            menu.addAction("剪切", self.input.cut)
+            menu.addSeparator()
+            apply_time = self._set_pending_time
+            clear_time = self._clear_pending_time
+        else:
+            apply_time = lambda day, moment: self._set_schedule_time(target_id, day, moment)
+            clear_time = lambda: self._clear_schedule_time(target_id)
+        menu.addAction("不提醒", clear_time)
         menu.addSeparator()
 
         now = datetime.now()
@@ -2554,32 +3087,38 @@ class MainWindow(QWidget):
             moment = now + timedelta(minutes=minutes)
             return moment.date(), moment.strftime("%H:%M")
 
-        menu.addAction("立即（现在）", lambda: self._set_pending_time(*offset(0)))
+        menu.addAction("立即（现在）", lambda: apply_time(*offset(0)))
         menu.addAction(f"{SNOOZE_MINUTES} 分钟后",
-                       lambda: self._set_pending_time(*offset(SNOOZE_MINUTES)))
-        menu.addAction("30 分钟后", lambda: self._set_pending_time(*offset(30)))
-        menu.addAction("1 小时后", lambda: self._set_pending_time(*offset(60)))
+                       lambda: apply_time(*offset(SNOOZE_MINUTES)))
+        menu.addAction("30 分钟后", lambda: apply_time(*offset(30)))
+        menu.addAction("1 小时后", lambda: apply_time(*offset(60)))
         menu.addSeparator()
         for hour in (9, 12, 15, 18, 21):
             menu.addAction(
                 f"今天 {hour:02d}:00",
-                lambda h=hour: self._set_pending_time(date.today(), f"{h:02d}:00"))
+                lambda h=hour: apply_time(date.today(), f"{h:02d}:00"))
         menu.addSeparator()
         menu.addAction(
             "明天 09:00",
-            lambda: self._set_pending_time(date.today() + timedelta(days=1), "09:00"))
+            lambda: apply_time(date.today() + timedelta(days=1), "09:00"))
         menu.addSeparator()
 
         picker = TimePicker()
-        picker.applied.connect(lambda qdt: self._apply_custom_time(qdt, menu))
+        picker.applied.connect(
+            lambda qdt: self._apply_custom_time(qdt, menu, target_id))
         action = QWidgetAction(menu)
         action.setDefaultWidget(picker)
         menu.addAction(action)
         return menu
 
-    def _apply_custom_time(self, value, menu: QMenu) -> None:
+    def _apply_custom_time(self, value, menu: QMenu, target_id: int | None = None) -> None:
         menu.close()
-        self._set_pending_time(value.date().toPyDate(), value.time().toString("HH:mm"))
+        day = value.date().toPyDate()
+        moment = value.time().toString("HH:mm")
+        if target_id is None:
+            self._set_pending_time(day, moment)
+        else:
+            self._set_schedule_time(target_id, day, moment)
 
     def _set_pending_time(self, day: date, moment: str) -> None:
         self._pending_when = (day.strftime(DAY_FMT), moment)
@@ -2639,6 +3178,9 @@ class MainWindow(QWidget):
             card = ScheduleCard(row)
             card.toggled.connect(self._toggle_schedule)
             card.deleted.connect(self._delete_schedule)
+            card.edited.connect(self._edit_schedule)
+            card.timeRequested.connect(self._pick_schedule_time)
+            card.menuRequested.connect(self._schedule_menu)
             self.schedule_layout.addWidget(card)
             if highlight_id is not None and row["id"] == highlight_id:
                 # 新卡片高亮闪一下（属性切换，不用透明度效果器 —— 避免卡片空白/不可见）
@@ -2668,6 +3210,218 @@ class MainWindow(QWidget):
         self._refresh_calendar()
         self._update_status()
 
+    # ---------------- 已创建日程的二次修改 ----------------
+    def _edit_schedule(self, schedule_id: int, text: str) -> None:
+        """卡片里改完内容（回车 / 点 ✓ / 双击后失焦）。"""
+        if self.store.update_schedule(schedule_id, text=text) is None:
+            return
+        self._refresh_schedule_list(highlight_id=schedule_id)
+        self._update_status()
+        self._status(f"已修改：{text[:18]}")
+
+    def _pick_schedule_time(self, schedule_id: int) -> None:
+        """点时间胶囊：直接给这条日程选提醒时间（或取消提醒）。"""
+        row = self.store.find(schedule_id)
+        if row is None:
+            return
+        menu = self._build_time_menu(target_id=schedule_id)
+        anchor = self.mapToGlobal(QPoint(self.width() // 2 - 90, self.height() // 2))
+        menu.exec(anchor)
+
+    def _set_schedule_time(self, schedule_id: int, day: date, moment: str) -> None:
+        stamp = day.strftime(DAY_FMT)
+        if self.store.update_schedule(schedule_id, moment=moment, day=stamp) is None:
+            return
+        self._refresh_schedule_list(highlight_id=schedule_id)
+        self._refresh_calendar()
+        self._update_status()
+        label = "今天" if stamp == today_str() else (
+            "明天" if stamp == (date.today() + timedelta(days=1)).strftime(DAY_FMT) else stamp[5:])
+        self._status(f"提醒时间已改为 {label} {moment}")
+
+    def _clear_schedule_time(self, schedule_id: int) -> None:
+        if self.store.update_schedule(schedule_id, moment="") is None:
+            return
+        self._refresh_schedule_list(highlight_id=schedule_id)
+        self._refresh_calendar()
+        self._update_status()
+        self._status("已取消这条的提醒时间")
+
+    def _schedule_menu(self, schedule_id: int, pos) -> None:
+        """右键卡片：改内容 / 改时间 / 复制 / 移动日期 / 标记完成 / 删除。"""
+        row = self.store.find(schedule_id)
+        if row is None:
+            return
+        menu = QMenu(self)
+        menu.addAction("修改内容", lambda: self._begin_card_edit(schedule_id))
+        menu.addAction("设置提醒时间…", lambda: self._pick_schedule_time(schedule_id))
+        if row.get("time"):
+            menu.addAction("取消提醒时间", lambda: self._clear_schedule_time(schedule_id))
+        menu.addSeparator()
+        menu.addAction("复制内容", lambda: self._copy_schedule_text(schedule_id))
+        if row["date"] != today_str():
+            menu.addAction("移到今天", lambda: self._move_schedule(schedule_id, today_str()))
+        tomorrow = (date.today() + timedelta(days=1)).strftime(DAY_FMT)
+        if row["date"] != tomorrow:
+            menu.addAction("移到明天", lambda: self._move_schedule(schedule_id, tomorrow))
+        if self._selected_date != row["date"]:
+            menu.addAction(f"查看 {self._date_label(row['date'])}", 
+                           lambda: self._on_day_picked(row["date"]))
+        menu.addSeparator()
+        menu.addAction("取消完成" if row["done"] else "标记完成",
+                       lambda: self._toggle_schedule(schedule_id))
+        menu.addAction("删除（可撤销）", lambda: self._delete_schedule(schedule_id))
+        menu.exec(self.mapToGlobal(QPoint(int(pos.x()), int(pos.y()))))
+
+    def _begin_card_edit(self, schedule_id: int) -> None:
+        for index in range(self.schedule_layout.count()):
+            widget = self.schedule_layout.itemAt(index).widget()
+            if isinstance(widget, ScheduleCard) and widget.schedule_id == schedule_id:
+                widget.enter_edit()
+                return
+
+    def _copy_schedule_text(self, schedule_id: int) -> None:
+        row = self.store.find(schedule_id)
+        if row is None:
+            return
+        QApplication.clipboard().setText(row["text"])
+        self._status("已复制这一条的内容")
+
+    def _move_schedule(self, schedule_id: int, day: str) -> None:
+        if self.store.update_schedule(schedule_id, day=day) is None:
+            return
+        self._refresh_schedule_list()
+        self._refresh_calendar()
+        self._update_status()
+        self._status(f"已移到 {self._date_label(day)}")
+
+    # ---------------- 问题 / 反馈收集页 ----------------
+    def _refresh_feedback_list(self) -> None:
+        clear_layout(self.fb_layout)
+        rows = self.store.feedback_items()
+        if not rows:
+            empty = QLabel("还没有记录的问题\n遇到 bug 随手记一条，攒够了一起修")
+            empty.setObjectName("EmptyHint")
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.fb_layout.addWidget(empty)
+        for row in rows:
+            card = FeedbackCard(row)
+            card.toggled.connect(self._toggle_feedback)
+            card.deleted.connect(self._delete_feedback)
+            card.edited.connect(self._edit_feedback)
+            card.menuRequested.connect(self._feedback_menu)
+            self.fb_layout.addWidget(card)
+        self.fb_layout.addStretch(1)
+        self.fb_scroll.verticalScrollBar().setValue(0)
+
+        open_count = self.store.feedback_count("open")
+        fixed_count = self.store.feedback_count("fixed")
+        self.fb_title.setText(f"🐞 问题收集 · 待修复 {open_count}")
+        self.fb_meta.setText(f"{open_count} 待修复 · {fixed_count} 已修复" if rows else "")
+        self.fb_clean_btn.setVisible(fixed_count > 0)
+
+    def _add_feedback(self) -> None:
+        raw = self.fb_input.text().strip()
+        if not raw:
+            self._status("先写一下这个问题")
+            self.fb_input.setFocus()
+            return
+        row = self.store.add_feedback(raw)
+        self.fb_input.clear()
+        self._refresh_feedback_list()
+        self._highlight_feedback(row["id"] if row else None)
+        self._update_status()
+        self.fb_input.setFocus()
+        self._status("已记录，攒够了一起修")
+
+    def _highlight_feedback(self, item_id: int | None) -> None:
+        if item_id is None:
+            return
+        for index in range(self.fb_layout.count()):
+            widget = self.fb_layout.itemAt(index).widget()
+            if isinstance(widget, FeedbackCard) and widget.item_id == item_id:
+                widget.flash()
+                return
+
+    def _toggle_feedback(self, item_id: int) -> None:
+        row = self.store.toggle_feedback(item_id)
+        if row is None:
+            return
+        self._refresh_feedback_list()
+        self._update_status()
+        self._status("已标记为已修复 ✓" if row["status"] == "fixed" else "回到待修复")
+
+    def _edit_feedback(self, item_id: int, text: str) -> None:
+        if self.store.update_feedback(item_id, text) is None:
+            return
+        self._refresh_feedback_list()
+        self._highlight_feedback(item_id)
+        self._status("已修改这条问题")
+
+    def _delete_feedback(self, item_id: int) -> None:
+        payload = self.store.delete_feedback(item_id)
+        if payload is None:
+            return
+        self._refresh_feedback_list()
+        self._update_status()
+        text = payload["row"]["text"][:16]
+        self.undo_toast.show_message(f"已删除问题「{text}」", "撤销",
+                                     lambda: self._undo(payload), UNDO_TIMEOUT_MS)
+
+    def _clear_fixed_feedback(self) -> None:
+        payload = self.store.clear_fixed_feedback()
+        if payload is None:
+            self._status("没有已修复的记录")
+            return
+        count = len(payload["rows"])
+        self._refresh_feedback_list()
+        self._update_status()
+        self.undo_toast.show_message(f"已清理 {count} 条已修复记录", "撤销",
+                                     lambda: self._undo(payload), UNDO_TIMEOUT_MS)
+
+    def _feedback_menu(self, item_id: int, pos) -> None:
+        row = self.store.find_feedback(item_id)
+        if row is None:
+            return
+        menu = QMenu(self)
+        menu.addAction("修改描述", lambda: self._begin_feedback_edit(item_id))
+        menu.addAction("复制这一条", lambda: self._copy_feedback(item_id))
+        menu.addSeparator()
+        menu.addAction("回到待修复" if row["status"] == "fixed" else "标记已修复",
+                       lambda: self._toggle_feedback(item_id))
+        menu.addAction("删除（可撤销）", lambda: self._delete_feedback(item_id))
+        menu.exec(self.mapToGlobal(QPoint(int(pos.x()), int(pos.y()))))
+
+    def _begin_feedback_edit(self, item_id: int) -> None:
+        for index in range(self.fb_layout.count()):
+            widget = self.fb_layout.itemAt(index).widget()
+            if isinstance(widget, FeedbackCard) and widget.item_id == item_id:
+                widget.enter_edit()
+                return
+
+    def _copy_feedback(self, item_id: int) -> None:
+        row = self.store.find_feedback(item_id)
+        if row is None:
+            return
+        QApplication.clipboard().setText(row["text"])
+        self._status("已复制这条问题")
+
+    def _export_feedback(self) -> None:
+        """把待修复问题整理成编号清单 → 剪贴板（直接发给 AI 一次性修）。"""
+        rows = self.store.feedback_items(only_open=True)
+        if not rows:
+            self._status("没有待修复的问题了 🎉")
+            return
+        lines = [f"smallM 待修复问题 · 共 {len(rows)} 条", ""]
+        for index, row in enumerate(rows, start=1):
+            lines.append(f"{index}. {row['text']}")
+        lines.append("")
+        lines.append("请按编号逐条修复，改完告诉我对应编号。")
+        QApplication.clipboard().setText("\n".join(lines))
+        message = f"已复制 {len(rows)} 条待修复问题（编号列表，可直接粘贴）"
+        self._status(message)
+        self.undo_toast.show_message(message, timeout=3000)
+
     def _delete_schedule(self, schedule_id: int) -> None:
         row = self.store.find(schedule_id)
         payload = self.store.delete(schedule_id)
@@ -2690,6 +3444,7 @@ class MainWindow(QWidget):
             self.editors[index].setPlainText(self.store.canvas_text(index))
             self._loading = False
         self._refresh_schedule_list()
+        self._refresh_feedback_list()
         self._refresh_calendar()
         self._update_status()
         self.undo_toast.show_message("已撤销，数据已恢复", timeout=1500)
@@ -2715,7 +3470,7 @@ class MainWindow(QWidget):
         total = self._split_total()
         if total <= 0:
             return self.calendar.natural_height()
-        panel_min = self.schedule_panel.minimumSizeHint().height()
+        panel_min = self._active_panel().minimumSizeHint().height()
         lower_max = max(0, total - CANVAS_MIN_H)         # 月历能拿到的上限（画布保底）
         return max(150, lower_max - panel_min - self._lower_spacing())
 
@@ -2727,7 +3482,7 @@ class MainWindow(QWidget):
         self.calendar_btn.setProperty("active", target)
         repolish(self.calendar_btn)
 
-        panel_min = self.schedule_panel.minimumSizeHint().height()
+        panel_min = self._active_panel().minimumSizeHint().height()
         spacing = self._lower_spacing()
         self._adjusting_calendar = True
         try:
@@ -3010,6 +3765,11 @@ class MainWindow(QWidget):
         stamp = self.store.last_saved or datetime.now().strftime("%H:%M:%S")
         self.status_label.setText(
             f"已保存 {stamp} · 画布 {self._page + 1}/{CANVAS_COUNT}")
+        if self._view == "feedback":
+            self.count_label.setText(
+                f"问题 {self.store.feedback_count()} 条 · 待修复 "
+                f"{self.store.feedback_count('open')}")
+            return
         pending = sum(1 for row in self.store.schedules_for(self._selected_date)
                       if not row["done"])
         self.count_label.setText(f"{self._date_label(self._selected_date)} · 待办 {pending}")
@@ -3030,6 +3790,7 @@ class MainWindow(QWidget):
         menu = QMenu()
         menu.addAction("显示 / 隐藏窗口", self._toggle_visibility)
         menu.addAction(f"极速速记（{HOTKEY}）", self._show_capture)
+        menu.addAction("问题收集页", self._open_feedback_view)
         menu.addSeparator()
         menu.addAction("测试系统通知", self._test_notification)
         menu.addAction("打开数据目录", self._open_data_dir)
@@ -3042,6 +3803,14 @@ class MainWindow(QWidget):
         self.tray.activated.connect(self._on_tray_activated)
         self.tray.show()
         self.toaster.tray = self.tray
+
+    def _open_feedback_view(self) -> None:
+        """托盘入口：显示窗口并切到问题收集页。"""
+        self._show_view("feedback")
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.fb_input.setFocus()
 
     def _test_notification(self) -> None:
         channel = self.toaster.send(f"{APP_NAME} · 通知自检", "看到这条通知说明提醒链路正常。")
