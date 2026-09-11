@@ -540,13 +540,20 @@ class DataStore:
 
     def load(self) -> None:
         self.data = self._blank()
+        self.loaded_version = 0
+        raw = None
         try:
             with open(self.path, "r", encoding="utf-8") as handle:
                 raw = json.load(handle)
         except (OSError, json.JSONDecodeError):
             raw = None
         if not isinstance(raw, dict):
+            # 首次运行或文件损坏：保持空白结构，让启动流程去创建文件
             return
+        try:
+            self.loaded_version = int(raw.get("version") or 0)
+        except (TypeError, ValueError):
+            self.loaded_version = 0
 
         canvases = raw.get("canvases")
         if isinstance(canvases, list):
@@ -616,6 +623,12 @@ class DataStore:
             for key in self.data["settings"]:
                 if key in settings:
                     self.data["settings"][key] = settings[key]
+
+        # 旧结构（如 version 6 没有 feedback 字段）在内存里已经完成迁移，
+        # 这里立刻落盘一次，让磁盘上的 version 与新结构保持一致，
+        # 不必等到用户下一次编辑才升级。
+        if self.loaded_version != self.data["version"]:
+            self.save()
 
     def save(self) -> bool:
         tmp = f"{self.path}.tmp"
